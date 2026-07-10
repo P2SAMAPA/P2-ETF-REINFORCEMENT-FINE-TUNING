@@ -30,6 +30,7 @@ MACRO_VARS = [
 HIDDEN_SIZE = 64
 NUM_LAYERS = 2
 SEQ_LEN = 10
+LEARNING_RATE = 0.001                    # added this line
 PRETRAIN_EPOCHS = 20
 RL_EPOCHS = 10
 RL_LR = 0.0001
