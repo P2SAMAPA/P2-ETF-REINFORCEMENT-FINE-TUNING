@@ -15,8 +15,8 @@ class PolicyNetwork(nn.Module):
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.actor = nn.Linear(hidden_size, 1)  # action: predicted return
-        self.critic = nn.Linear(hidden_size, 1)  # value: state value
+        self.actor = nn.Linear(hidden_size, 1)
+        self.critic = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
         lstm_out, _ = self.lstm(x)
@@ -56,30 +56,36 @@ class RFTAgent:
         # Compute advantages
         advantages = rewards - values
         # Normalise advantages
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        if advantages.std() > 1e-8:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        else:
+            advantages = advantages - advantages.mean()
         # PPO update
+        total_loss = 0.0
         for _ in range(epochs):
             action_pred, value_pred = self.policy(states)
             # Policy loss
-            ratio = torch.exp(action_pred - actions)  # log prob ratio approximation
+            ratio = torch.exp(action_pred - actions)
             surr1 = ratio * advantages
             surr2 = torch.clamp(ratio, 1-clip, 1+clip) * advantages
             policy_loss = -torch.min(surr1, surr2).mean()
             # Value loss
             value_loss = F.mse_loss(value_pred, rewards)
-            # Entropy bonus (for exploration)
+            # Entropy bonus
             entropy = -torch.exp(action_pred) * action_pred.mean()
             loss = policy_loss + 0.5 * value_loss - 0.01 * entropy
+            # Ensure loss is a scalar
+            if loss.dim() > 0:
+                loss = loss.mean()
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
-        return loss.item()
+            total_loss += loss.item()
+        return total_loss / epochs
 
 def prepare_data(returns, macro_df, seq_len=10):
     """
     Prepare sequences for training.
-    returns: pandas Series (single ETF)
-    macro_df: pandas DataFrame (macro variables)
     """
     if len(returns) < seq_len + 1:
         return None, None
@@ -106,7 +112,7 @@ def rft_score(returns, macro_df, hidden_size=64, num_layers=2, seq_len=10, pretr
         return 0.0
     input_size = X.shape[2]
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    # Pretrain the policy network with supervised learning
+    # Pretrain
     pretrain_model = PolicyNetwork(input_size, hidden_size, num_layers).to(device)
     dataset = torch.utils.data.TensorDataset(torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.float32))
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -124,23 +130,18 @@ def rft_score(returns, macro_df, hidden_size=64, num_layers=2, seq_len=10, pretr
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
-    # Load pretrained weights into RL agent
+    # RL fine-tuning
     agent = RFTAgent(input_size, hidden_size, num_layers, lr=rl_lr)
     agent.policy.load_state_dict(pretrain_model.state_dict())
     agent.policy.to(device)
-    # RL fine-tuning: use portfolio return as reward
-    # For each episode, we simulate a portfolio using the model's predictions
-    # Reward = cumulative return of the portfolio over the episode
-    # We'll use the training data for RL episodes
-    n_episodes = len(X) // seq_len
-    for episode in range(min(rl_epochs, max(1, n_episodes))):
+    n_episodes = max(1, len(X) // seq_len)
+    for episode in range(min(rl_epochs, n_episodes)):
         episode_start = episode * seq_len
         episode_end = min((episode + 1) * seq_len, len(X))
         if episode_end - episode_start < seq_len:
             break
         episode_X = X[episode_start:episode_end]
         episode_y = y[episode_start:episode_end]
-        # Rollout: get actions for the episode
         actions = []
         values = []
         states = []
@@ -151,19 +152,15 @@ def rft_score(returns, macro_df, hidden_size=64, num_layers=2, seq_len=10, pretr
                 actions.append(action.item())
                 values.append(value.item())
                 states.append(state)
-        # Compute reward: portfolio return using the predictions
-        # Simple: take long position if action > 0, short if action < 0
-        # Reward = sum of returns weighted by position
+        # Reward = portfolio return
         returns_ep = episode_y
         positions = np.sign(actions)
         portfolio_return = np.mean(positions * returns_ep)
-        reward = portfolio_return  # task-performance reward
-        # Store transitions
+        reward = portfolio_return
         for t in range(len(states)):
             agent.store_transition(states[t], actions[t], reward / len(states), values[t])
-        # Train the agent on the episode
         loss = agent.train_step(batch_size=rl_batch, clip=ppo_clip, epochs=ppo_epochs)
-    # Predict next day
+    # Predict
     agent.policy.eval()
     with torch.no_grad():
         ret_seq = returns.iloc[-seq_len:].values.reshape(-1, 1)
