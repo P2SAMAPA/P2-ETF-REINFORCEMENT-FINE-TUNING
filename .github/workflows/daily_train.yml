@@ -2,7 +2,7 @@ name: Daily RFT Training
 
 on:
   schedule:
-    - cron: '10 00 * * *'
+    - cron: '50 23 * * *'
   workflow_dispatch:
 
 jobs:
