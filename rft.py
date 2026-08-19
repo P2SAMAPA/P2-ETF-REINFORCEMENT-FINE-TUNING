@@ -93,6 +93,16 @@ def prepare_data(returns, macro_df, seq_len=10):
     common_idx = returns.index.intersection(macro_df.index)
     ret_aligned = returns.loc[common_idx]
     macro_aligned = macro_df.loc[common_idx]
+    # Drop any rows that are still NaN after alignment/standardization (e.g.
+    # a ticker's pre-inception dates, or a macro column with no coverage at
+    # all). Feeding a single NaN into the LSTM poisons every weight for the
+    # rest of training via NaN gradients -- silently, since nn.MSELoss()
+    # and Adam don't raise on NaN, they just propagate it.
+    valid_mask = ret_aligned.notna() & macro_aligned.notna().all(axis=1)
+    ret_aligned = ret_aligned[valid_mask]
+    macro_aligned = macro_aligned[valid_mask]
+    if len(ret_aligned) < seq_len + 1:
+        return None, None
     X, y = [], []
     for i in range(seq_len, len(ret_aligned)):
         ret_seq = ret_aligned.iloc[i - seq_len:i].values.reshape(-1, 1)
@@ -165,6 +175,16 @@ def rft_score(returns, macro_df, hidden_size=64, num_layers=2, seq_len=10, pretr
     X, y = prepare_data(returns_scaled, macro_scaled, seq_len)
     if X is None or len(X) < batch_size:
         return 0.0
+    if not np.isfinite(X).all() or not np.isfinite(y).all():
+        # Defensive guard: if NaN/Inf still made it through (e.g. an
+        # upstream data issue we haven't seen yet), fail loudly here rather
+        # than training a model to NaN weights and returning a value that
+        # looks like a legitimate (if boring) score of 0.0 downstream.
+        raise ValueError(
+            "rft_score: NaN/Inf detected in model inputs after standardization "
+            "and NaN-row filtering. Check the underlying master_data.parquet "
+            "for gaps in this ticker's price history or the macro columns."
+        )
     input_size = X.shape[2]
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
