@@ -8,19 +8,28 @@ import config
 import data_manager as dm
 from rft import rft_score
 
-def normalize_scores(score_dict):
+def normalize_scores(score_dict, label=""):
     scores = np.array(list(score_dict.values()))
     scores = scores[np.isfinite(scores)]
     if len(scores) == 0:
         return {k: 0.0 for k in score_dict}
     min_s, max_s = scores.min(), scores.max()
-    if max_s - min_s < 1e-12:
+    spread = max_s - min_s
+    if spread < 1e-12:
+        # This fallback used to fire silently whenever raw scores were (or
+        # rounded to) nearly identical -- which is what produced "same score
+        # for every ETF" in the UI. It's now logged so a collapse in the
+        # underlying model is visible instead of being masked.
+        print(f"  [WARN] {label}: raw score spread is {spread:.2e} (min={min_s:.6f}, "
+              f"max={max_s:.6f}) -> normalize_scores is falling back to 0.5 for all tickers. "
+              f"This means rft_score() is returning near-identical values; see rft.py's "
+              f"input standardization fix.")
         return {k: 0.5 for k in score_dict}
-    norm = (scores - min_s) / (max_s - min_s)
+    norm = (scores - min_s) / spread
     tickers = list(score_dict.keys())
     return {tickers[i]: float(norm[i]) for i in range(len(norm))}
 
-def run_for_window(returns, macro_df, window_days):
+def run_for_window(returns, macro_df, window_days, label=""):
     if len(returns) < window_days:
         return None
     ret_window = returns.iloc[-window_days:]
@@ -49,7 +58,13 @@ def run_for_window(returns, macro_df, window_days):
         if not np.isfinite(s):
             s = 0.0
         raw_scores[ticker] = float(s)
-    norm_scores = normalize_scores(raw_scores)
+    # Quick visibility into raw score spread per window/universe, so a
+    # collapse (all scores clustered near-identical) is obvious in the logs
+    # rather than only showing up as "same score" in the final UI.
+    raw_vals = np.array(list(raw_scores.values()))
+    print(f"  {label} raw score range: min={raw_vals.min():.6f}, max={raw_vals.max():.6f}, "
+          f"std={raw_vals.std():.6f}")
+    norm_scores = normalize_scores(raw_scores, label=label)
     sorted_norm = sorted(norm_scores.items(), key=lambda x: x[1], reverse=True)
     top_etfs = [{"ticker": t, "rft_score_norm": s, "raw_score": raw_scores[t]} for t, s in sorted_norm[:config.TOP_N]]
     return {
@@ -87,7 +102,7 @@ def main():
         all_window_results = []
         for w in config.WINDOWS:
             print(f"  Window {w} days")
-            out = run_for_window(returns, macro_df, w)
+            out = run_for_window(returns, macro_df, w, label=f"{uni_name}/{w}d")
             if out:
                 all_window_results.append(out)
             else:
