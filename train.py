@@ -40,22 +40,33 @@ def run_for_window(returns, macro_df, window_days, label=""):
         return None
     raw_scores = {}
     for ticker in ret_window.columns:
-        s = rft_score(
-            ret_window[ticker],
-            macro_window,
-            hidden_size=config.HIDDEN_SIZE,
-            num_layers=config.NUM_LAYERS,
-            seq_len=config.SEQ_LEN,
-            pretrain_epochs=config.PRETRAIN_EPOCHS,
-            rl_epochs=config.RL_EPOCHS,
-            lr=config.LEARNING_RATE,
-            batch_size=config.BATCH_SIZE,
-            rl_lr=config.RL_LR,
-            rl_batch=config.RL_BATCH_SIZE,
-            ppo_clip=config.PPO_CLIP,
-            ppo_epochs=config.PPO_EPOCHS
-        )
+        n_nan_ret = int(ret_window[ticker].isna().sum())
+        n_nan_macro = int(macro_window.isna().sum().sum())
+        if n_nan_ret > 0 or n_nan_macro > 0:
+            print(f"    [{ticker}] {n_nan_ret} NaN return rows, "
+                  f"{n_nan_macro} NaN macro cells in this window (will be dropped)")
+        try:
+            s = rft_score(
+                ret_window[ticker],
+                macro_window,
+                hidden_size=config.HIDDEN_SIZE,
+                num_layers=config.NUM_LAYERS,
+                seq_len=config.SEQ_LEN,
+                pretrain_epochs=config.PRETRAIN_EPOCHS,
+                rl_epochs=config.RL_EPOCHS,
+                lr=config.LEARNING_RATE,
+                batch_size=config.BATCH_SIZE,
+                rl_lr=config.RL_LR,
+                rl_batch=config.RL_BATCH_SIZE,
+                ppo_clip=config.PPO_CLIP,
+                ppo_epochs=config.PPO_EPOCHS
+            )
+        except ValueError as e:
+            print(f"    [{ticker}] SKIPPED: {e}")
+            s = np.nan
         if not np.isfinite(s):
+            print(f"    [{ticker}] WARNING: rft_score returned non-finite value, "
+                  f"defaulting to 0.0 for this ticker/window")
             s = 0.0
         raw_scores[ticker] = float(s)
     # Quick visibility into raw score spread per window/universe, so a
